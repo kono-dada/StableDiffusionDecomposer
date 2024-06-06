@@ -5,10 +5,12 @@ import torch.nn.functional as F
 import xformers
 
 
-class MyAttnProcessor:
+class QKVReplaceableAttnProcessor:
     r"""
     Default processor for performing attention-related computations.
     """
+    def __init__(self):
+        self.replaced_qkv = {}
 
     def __call__(
         self,
@@ -52,14 +54,20 @@ class MyAttnProcessor:
         self.guidance = key.shape[0] > 1
         
         query = attn.head_to_batch_dim(query)
-        if hasattr(self, 'my_query'):
-            if self.guidance:
-                uncond, cond = torch.chunk(query, 2, dim=0)
-                query = torch.cat([uncond, self.my_query], dim=0)
-            else:
-                query = self.my_query
         key = attn.head_to_batch_dim(key)
         value = attn.head_to_batch_dim(value)
+        def replace(f, name):
+            if self.guidance:
+                uncond, cond = torch.chunk(f, 2, dim=0)
+                return torch.cat([uncond, self.replaced_qkv[name]], dim=0)
+            else:
+                return self.replaced_qkv[name]
+        if 'q' in self.replaced_qkv:
+            query = replace(query, 'q')
+        if 'k' in self.replaced_qkv:
+            key = replace(key, 'k')
+        if 'v' in self.replaced_qkv:
+            value = replace(value, 'v')
 
         attention_probs = attn.get_attention_scores(query, key, attention_mask)
         if hasattr(self, 'attn_map'):
@@ -196,7 +204,7 @@ def prep_unet_attention(unet):
     for name, module in unet.named_modules():
         module_name = type(module).__name__
         if module_name == "Attention":
-            module.set_processor(MyAttnProcessor())
+            module.set_processor(QKVReplaceableAttnProcessor())
 
 
 # class MySelfAttnProcessor:
