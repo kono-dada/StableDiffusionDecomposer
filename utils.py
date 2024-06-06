@@ -53,7 +53,8 @@ def interpolate_latents_and_inference(
     # create a series of latent vectors that interpolate between latent_1 and latent_2
     # to keep the variance of the latents constant, we scale the latents by the square root of w
     latents = latent_1 * torch.sqrt(w)[:, None, None, None] + \
-        latent_2 * torch.sqrt(1 - w)[:, None, None, None]  # (steps, -1, -1, -1)
+        latent_2 * torch.sqrt(1 - w)[:, None, None,
+                                     None]  # (steps, -1, -1, -1)
     pipeline.safety_checker = None
     img = pipeline(
         prompt,

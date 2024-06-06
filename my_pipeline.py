@@ -267,7 +267,11 @@ class MutualAttention:
         target_attn = [ATTN_BLOCKS[j] for j in replaced_attn_indice]
         for name, module in modules:
             if name in target_attn:
-                q, k, v, a = module.processor.record_QKV()
+                if module.processor.guidance:
+                    q, k, v, a = map(lambda _: torch.chunk(_, 2, dim=0)[
+                                    1], module.processor.record_QKV())  # only need the second half
+                else:
+                    q, k, v, a = module.processor.record_QKV()
                 attentions[name] = QKV(
                     t, name, q, k, v, a, module.processor.guidance)
 
