@@ -1,5 +1,5 @@
 from typing import Callable, Dict, List, Optional, Tuple, Union
-from diffusers import StableDiffusionPipeline
+from diffusers import StableDiffusionPipeline, DDIMInverseScheduler, DDIMScheduler, PNDMScheduler
 import torch
 from callback import QKVRecordCallback, ATTN_BLOCKS, QKV
 from my_attn import prep_unet_attention
@@ -144,8 +144,15 @@ def run_with_attn_replacement(
 
 
 class MutualAttention:
-    def __init__(self, p: StableDiffusionPipeline) -> None:
+    """
+    
+    """
+    def __init__(
+        self, p: StableDiffusionPipeline,
+        ddim_scheduler: DDIMScheduler,
+    ):
         self.p = p
+        self.ddim_scheduler = ddim_scheduler
 
     def __call__(
         self,
@@ -162,7 +169,6 @@ class MutualAttention:
         clip_skip: Optional[int] = None,
         bs: int = 1,
     ) -> Tuple[torch.FloatTensor, torch.FloatTensor]:
-        callback_on_step_end_tensor_inputs: List[str] = ["latents"]
         self.p._guidance_scale = guidance_scale
         self.p._clip_skip = clip_skip
         self.p._interrupt = False
@@ -182,7 +188,7 @@ class MutualAttention:
             device,
             bs,
             self.p.do_classifier_free_guidance,
-            negative_prompt,
+            '',
             clip_skip=self.p.clip_skip,
         )
 
@@ -191,11 +197,10 @@ class MutualAttention:
         # to avoid doing two forward passes
         if self.p.do_classifier_free_guidance:
             prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds])
-            ref_prompt_embeds = torch.cat(
-                [ref_negative_prompt_embeds, ref_prompt_embeds])
 
         # 4. Prepare timesteps
         self.p.scheduler.set_timesteps(num_inference_steps, device=device)
+        self.ddim_scheduler.set_timesteps(num_inference_steps, device=device)
 
         # 7. Denoising loop
         self.p._num_timesteps = num_inference_steps
@@ -240,8 +245,7 @@ class MutualAttention:
     ) -> Tuple[torch.FloatTensor, Dict[str, QKV]]:
         prep_unet_attention(self.p.unet)
         # expand the latents if we are doing classifier free guidance
-        latent_model_input = torch.cat(
-            [ref_latents] * 2) if self.p.do_classifier_free_guidance else ref_latents
+        latent_model_input = ref_latents
 
         # predict the noise residual
         noise_pred = self.p.unet(
@@ -251,14 +255,8 @@ class MutualAttention:
             return_dict=False,
         )[0]
 
-        # perform guidance
-        if self.p.do_classifier_free_guidance:
-            noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-            noise_pred = noise_pred_uncond + self.p.guidance_scale * \
-                (noise_pred_text - noise_pred_uncond)
-
         # compute the previous noisy sample x_t -> x_t-1
-        ref_latents = self.p.scheduler.step(
+        ref_latents = self.ddim_scheduler.step(
             noise_pred, t, ref_latents, return_dict=False)[0]
 
         # record the required attentions
@@ -267,11 +265,7 @@ class MutualAttention:
         target_attn = [ATTN_BLOCKS[j] for j in replaced_attn_indice]
         for name, module in modules:
             if name in target_attn:
-                if module.processor.guidance:
-                    q, k, v, a = map(lambda _: torch.chunk(_, 2, dim=0)[
-                                    1], module.processor.record_QKV())  # only need the second half
-                else:
-                    q, k, v, a = module.processor.record_QKV()
+                q, k, v, a = module.processor.record_QKV()
                 attentions[name] = QKV(
                     t, name, q, k, v, a, module.processor.guidance)
 
